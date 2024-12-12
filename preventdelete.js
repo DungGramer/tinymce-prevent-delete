@@ -10,6 +10,38 @@
     // Range validation function
     const isWithinRange = (value, min, max) => value >= min && value <= max;
 
+    // Function to check if a string has any non-whitespace character near the specified position
+    const hasTextAround = (str, pos, left = true) => {
+      for (
+        let i = left ? pos - 1 : pos;
+        left ? i > 0 : i < str.length;
+        left ? i-- : i++
+      ) {
+        // 160 is &nbsp, 32 is ' '
+        if ([160, 32].contains(str.charCodeAt(i))) continue; // Skip spaces
+        return true; // Found non-whitespace character
+      }
+      return false;
+    };
+
+    // Function to check if there's a stop condition (space and text sequence) around the position
+    const hasStopTextAround = (str, pos, left = true) => {
+      let foundSpace = false;
+      let foundText = false;
+      for (
+        let i = left ? pos - 1 : pos;
+        left ? i > 0 : i < str.length;
+        left ? i-- : i++
+      ) {
+        const isSpace = [160, 32].contains(str.charCodeAt(i));
+        if (!foundSpace && isSpace) foundSpace = true;
+        else if (!foundText && !isSpace) foundText = true;
+
+        if (foundSpace && foundText) return true; // Space and text found
+      }
+      return false;
+    };
+
     // Prevent delete class and root ID
     this.rootId = 'tinymce';
     this.preventDeleteClass = 'mceNonEditable';
@@ -76,7 +108,7 @@
       let nextSibling = currentElem.nextElementSibling;
       while (!nextSibling) {
         currentElem = currentElem.parentElement;
-        if (currentElem.id === self.rootId) return false;
+        if (currentElem?.id === self.rootId) return false;
         nextSibling = currentElem.nextElementSibling;
       }
       return nextSibling;
@@ -110,8 +142,57 @@
     */
     this.keyWillDelete = (evt) => {
       const keyCode = evt.keyCode;
-      // ctrl+x or ctrl+back/del will all delete, but otherwise it probably won't
-      if (evt.ctrlKey) return evt.key === 'x' || [8, 46].contains(keyCode);
+      const isBackspace = evt?.keyCode === 8;
+      const isDelete = evt?.keyCode === 46;
+
+      if (evt.shiftKey || evt.ctrlKey || isBackspace || isDelete) {
+        const selectedNode = tinymce.activeEditor.selection.getNode();
+        const range = tinymce.activeEditor.selection.getRng();
+
+        const prevSibling = self.prevElement(range.startContainer);
+        const nextSibling = self.nextElement(range.startContainer);
+        const hasNonEditable =
+          self.hasNonEditableNode(selectedNode) ||
+          self.hasNonEditableNode(range.startContainer) ||
+          self.hasNonEditableInChildren(range.startContainer) ||
+          ((!range.startContainer.textContent ||
+            !range.startContainer.textContent.trim()) &&
+            self.hasNonEditableNode(prevSibling)) ||
+          self.hasNonEditableInChildren(prevSibling) ||
+          self.hasNonEditableNode(nextSibling);
+
+        // Handle Shift+Insert, Shift+Delete, Shift+Backspace in range
+        if (
+          evt.shiftKey &&
+          (['Insert', 'Delete', 'Backspace'].includes(evt.key) ||
+            [45, 8, 46].includes(keyCode)) &&
+          hasNonEditable
+        )
+          return self.cancelKey(evt);
+
+        // Handle Ctrl+v, Ctrl+x, Ctrl+Delete, Ctrl+Backspace in range
+        if (
+          evt.ctrlKey &&
+          (['v', 'x', 'Delete', 'Backspace'].includes(evt.key) ||
+            [86, 88, 8, 46].includes(keyCode)) &&
+          hasNonEditable
+        )
+          return self.cancelKey(evt);
+
+        // Handle delete when next is mceNonEditable
+        if (isDelete) {
+          const nextSibling = self.nextElement(range.endContainer);
+          if (!nextSibling || self.hasNonEditableNode(nextSibling)) {
+            return self.cancelKey(evt);
+          }
+        }
+
+        // Handle backspace when prev is mceNonEditable
+        if (isBackspace && hasNonEditable) {
+          return self.cancelKey(evt);
+        }
+      }
+
       return (
         [8, 9, 13, 46].contains(keyCode) ||
         isWithinRange(keyCode, 48, 57) ||
@@ -163,47 +244,84 @@
     };
 
     this.handleEvent = (evt) => {
-      if (!self.keyWillDelete(evt)) return true;
+      // const selectedNode = tinymce.activeEditor.selection.getNode();
+      // if (
+      //   self.hasNonEditableNode(selectedNode) ||
+      //   self.hasNonEditableInChildren(selectedNode)
+      // ) {
+      //   return self.cancelKey(evt);
+      // }
 
-      const selectedNode = tinymce.activeEditor.selection.getNode();
       const range = tinymce.activeEditor.selection.getRng();
+      const isBackspace = evt?.keyCode === 8;
+      const isDelete = evt?.keyCode === 46;
 
-      const prev = self.prevElement(range.startContainer);
-      const next = self.nextElement(range.startContainer);
-      const startContainer = range.startContainer;
-      const startTextContent = startContainer?.textContent;
-      const cleanedTextContent = startTextContent?.replace(/^\uFEFF/gm, '');
-      const prevCheck =
-        self.hasNonEditableNode(prev) || self.hasNonEditableInChildren(prev);
-      const nextCheck = self.hasNonEditableNode(next);
-
-      const isStartContainerValid =
-        self.hasNonEditableNode(startContainer) ||
-        self.hasNonEditableInChildren(startContainer);
-      const isStartContentValid =
-        startContainer && startTextContent && cleanedTextContent?.length;
-
-      // Prevent deletion if the range contains non-editable content
       if (
-        self.checkRange(range) ||
-        self.hasNonEditableNode(selectedNode) ||
-        self.hasNonEditableInChildren(selectedNode) ||
-        (!isStartContainerValid &&
-          !isStartContentValid &&
-          (prevCheck || nextCheck))
+        range.endContainer &&
+        range.endOffset === 0 &&
+        self.hasNonEditableNode(range.endContainer)
       ) {
         return self.cancelKey(evt);
       }
+
+      if (self.checkRange(range)) return self.cancelKey(evt);
+
+      const endContainerText = range.endContainer.textContent || '';
+      const isZwnbsp =
+        range.startContainer.textContent &&
+        range.startContainer.textContent.charCodeAt(0) === 65279;
+
+      const deleteWithinNode =
+        isDelete &&
+        range.endOffset < endContainerText.length &&
+        !(isZwnbsp && endContainerText.length === 1);
+      const backspaceWithinNode =
+        isBackspace && range.startOffset > (isZwnbsp ? 1 : 0);
+      const ctrlDanger =
+        evt.ctrlKey &&
+        (isBackspace || isDelete) &&
+        !hasTextAround(
+          range.startContainer.data,
+          range.startOffset,
+          isBackspace
+        );
+
+      // Allow the delete
+      if ((deleteWithinNode || backspaceWithinNode) && !ctrlDanger) {
+        return true;
+      }
+
+      const noselection = range.startOffset === range.endOffset;
+      // If ctrl is a danger we need to skip this block and check the siblings which is done in the rest of this function
+      if (!ctrlDanger) {
+        if (
+          isDelete &&
+          noselection &&
+          range.startOffset + 1 < range.endContainer.childElementCount
+        ) {
+          const elem = range.endContainer.childNodes[range.startOffset + 1];
+          return self.check(elem) ? self.cancelKey(evt) : true;
+        }
+
+        //The range is within this container
+        if (range.startOffset !== range.endOffset) {
+          //If this container is non-editable, cancel the event, otherwise allow the event
+          return self.checkRange(range) ? self.cancelKey(evt) : true;
+        }
+      }
+
+      return !self.keyWillDelete(evt);
     };
 
     // Plugin logic to intercept keydown events and prevent deletion
     tinymce.PluginManager.add('preventdelete', (ed) => {
       ed.on('keydown', (evt) => self.handleEvent(evt));
       ed.on('BeforeExecCommand', (evt) => {
-        if (['Cut', 'Delete', 'Paste'].includes(evt.command)) {
+        if (
+          ['Cut', 'Delete', 'Paste', 'mceInsertContent'].includes(evt.command)
+        ) {
           self.handleEvent(evt);
         }
-
         return true;
       });
       ed.on('BeforeSetContent', (evt) => self.handleEvent(evt));
