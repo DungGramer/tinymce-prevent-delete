@@ -152,7 +152,7 @@
     };
 
     // Function to check if any child of a node has the 'prevent delete' class
-    this.checkChildren = (node) => {
+    this.hasNonEditableInChildren = (node) => {
       if (
         !node ||
         node.nodeType !== 1 ||
@@ -162,25 +162,51 @@
       return node.querySelector(`.${self.preventDeleteClass}`) !== null;
     };
 
+    this.handleEvent = (evt) => {
+      if (!self.keyWillDelete(evt)) return true;
+
+      const selectedNode = tinymce.activeEditor.selection.getNode();
+      const range = tinymce.activeEditor.selection.getRng();
+
+      const prev = self.prevElement(range.startContainer);
+      const next = self.nextElement(range.startContainer);
+      const startContainer = range.startContainer;
+      const startTextContent = startContainer?.textContent;
+      const cleanedTextContent = startTextContent?.replace(/^\uFEFF/gm, '');
+      const prevCheck =
+        self.hasNonEditableNode(prev) || self.hasNonEditableInChildren(prev);
+      const nextCheck = self.hasNonEditableNode(next);
+
+      const isStartContainerValid =
+        self.hasNonEditableNode(startContainer) ||
+        self.hasNonEditableInChildren(startContainer);
+      const isStartContentValid =
+        startContainer && startTextContent && cleanedTextContent?.length;
+
+      // Prevent deletion if the range contains non-editable content
+      if (
+        self.checkRange(range) ||
+        self.hasNonEditableNode(selectedNode) ||
+        self.hasNonEditableInChildren(selectedNode) ||
+        (!isStartContainerValid &&
+          !isStartContentValid &&
+          (prevCheck || nextCheck))
+      ) {
+        return self.cancelKey(evt);
+      }
+    };
+
     // Plugin logic to intercept keydown events and prevent deletion
     tinymce.PluginManager.add('preventdelete', (ed) => {
-      ed.on('keydown', (evt) => {
-        if (!self.keyWillDelete(evt)) return true;
-        const range = tinymce.activeEditor.selection.getRng();
-        if (self.checkRange(range)) return self.cancelKey(evt);
-      });
-      ed.on('BeforeExecCommand', function (evt) {
+      ed.on('keydown', (evt) => self.handleEvent(evt));
+      ed.on('BeforeExecCommand', (evt) => {
         if (['Cut', 'Delete', 'Paste'].includes(evt.command)) {
-          const range = tinymce.activeEditor.selection.getRng();
-          if (self.checkRange(range)) return self.cancelKey(evt);
+          self.handleEvent(evt);
         }
 
         return true;
       });
-      ed.on('BeforeSetContent', function (evt) {
-        const range = tinymce.activeEditor.selection.getRng();
-        if (self.checkRange(range)) return self.cancelKey(evt);
-      });
+      ed.on('BeforeSetContent', (evt) => self.handleEvent(evt));
     });
   }
 
