@@ -10,38 +10,6 @@
     // Range validation function
     const isWithinRange = (value, min, max) => value >= min && value <= max;
 
-    // Function to check if a string has any non-whitespace character near the specified position
-    const hasTextAround = (str, pos, left = true) => {
-      for (
-        let i = left ? pos - 1 : pos;
-        left ? i > 0 : i < str.length;
-        left ? i-- : i++
-      ) {
-        // 160 is &nbsp, 32 is ' '
-        if ([160, 32].contains(str.charCodeAt(i))) continue; // Skip spaces
-        return true; // Found non-whitespace character
-      }
-      return false;
-    };
-
-    // Function to check if there's a stop condition (space and text sequence) around the position
-    const hasStopTextAround = (str, pos, left = true) => {
-      let foundSpace = false;
-      let foundText = false;
-      for (
-        let i = left ? pos - 1 : pos;
-        left ? i > 0 : i < str.length;
-        left ? i-- : i++
-      ) {
-        const isSpace = [160, 32].contains(str.charCodeAt(i));
-        if (!foundSpace && isSpace) foundSpace = true;
-        else if (!foundText && !isSpace) foundText = true;
-
-        if (foundSpace && foundText) return true; // Space and text found
-      }
-      return false;
-    };
-
     // Prevent delete class and root ID
     this.rootId = 'tinymce';
     this.preventDeleteClass = 'mceNonEditable';
@@ -49,13 +17,8 @@
     // Function to check if a node or its children have the 'prevent delete' class
     this.hasNonEditableNode = (node) => {
       if (!node) return false;
-      if (
-        node.nodeType === 1 &&
-        node.classList &&
-        node.classList.contains(self.preventDeleteClass)
-      ) {
-        return true;
-      }
+      if (node.nodeName.toLowerCase() === 'body') return false;
+      if (self.checkNode(node)) return true;
       if (node.hasChildNodes()) {
         for (const child of node.childNodes) {
           if (self.hasNonEditableNode(child)) return true;
@@ -157,9 +120,35 @@
           self.hasNonEditableInChildren(range.startContainer) ||
           ((!range.startContainer.textContent ||
             !range.startContainer.textContent.trim()) &&
-            self.hasNonEditableNode(prevSibling)) ||
-          self.hasNonEditableInChildren(prevSibling) ||
-          self.hasNonEditableNode(nextSibling);
+            (self.hasNonEditableNode(prevSibling) ||
+              self.hasNonEditableInChildren(prevSibling) ||
+              self.hasNonEditableNode(nextSibling)));
+
+        const noSelected =
+          range.startOffset === range.endOffset ||
+          range?.startContainer.textContent === '';
+
+        // Handle delete empty line, press ctrl+delete, shift+delete, ctrl+backspace, shift+delete
+        if (noSelected) {
+          if (
+            (evt.ctrlKey || evt.shiftKey) &&
+            isBackspace &&
+            range.startOffset === 0 &&
+            (self.hasNonEditableNode(prevSibling) ||
+              self.hasNonEditableInChildren(prevSibling))
+          ) {
+            return self.cancelKey(evt);
+          }
+
+          if (
+            isDelete &&
+            (evt.ctrlKey || evt.shiftKey) &&
+            (self.hasNonEditableNode(nextSibling) ||
+              self.hasNonEditableInChildren(nextSibling))
+          ) {
+            return self.cancelKey(evt);
+          }
+        }
 
         // Handle Shift+Insert, Shift+Delete, Shift+Backspace in range
         if (
@@ -176,8 +165,9 @@
           (['v', 'x', 'Delete', 'Backspace'].includes(evt.key) ||
             [86, 88, 8, 46].includes(keyCode)) &&
           hasNonEditable
-        )
+        ) {
           return self.cancelKey(evt);
+        }
 
         // Handle delete when next is mceNonEditable
         if (isDelete) {
@@ -193,14 +183,14 @@
         }
       }
 
-      return (
-        [8, 9, 13, 46].contains(keyCode) ||
+      if (
         isWithinRange(keyCode, 48, 57) ||
         isWithinRange(keyCode, 65, 90) ||
         isWithinRange(keyCode, 96, 111) ||
         isWithinRange(keyCode, 186, 192) ||
         isWithinRange(keyCode, 219, 222)
-      );
+      )
+        return false;
     };
 
     // Cancel the key event (e.g., prevent default delete behavior)
@@ -244,17 +234,7 @@
     };
 
     this.handleEvent = (evt) => {
-      // const selectedNode = tinymce.activeEditor.selection.getNode();
-      // if (
-      //   self.hasNonEditableNode(selectedNode) ||
-      //   self.hasNonEditableInChildren(selectedNode)
-      // ) {
-      //   return self.cancelKey(evt);
-      // }
-
       const range = tinymce.activeEditor.selection.getRng();
-      const isBackspace = evt?.keyCode === 8;
-      const isDelete = evt?.keyCode === 46;
 
       if (
         range.endContainer &&
@@ -265,52 +245,7 @@
       }
 
       if (self.checkRange(range)) return self.cancelKey(evt);
-
-      const endContainerText = range.endContainer.textContent || '';
-      const isZwnbsp =
-        range.startContainer.textContent &&
-        range.startContainer.textContent.charCodeAt(0) === 65279;
-
-      const deleteWithinNode =
-        isDelete &&
-        range.endOffset < endContainerText.length &&
-        !(isZwnbsp && endContainerText.length === 1);
-      const backspaceWithinNode =
-        isBackspace && range.startOffset > (isZwnbsp ? 1 : 0);
-      const ctrlDanger =
-        evt.ctrlKey &&
-        (isBackspace || isDelete) &&
-        !hasTextAround(
-          range.startContainer.data,
-          range.startOffset,
-          isBackspace
-        );
-
-      // Allow the delete
-      if ((deleteWithinNode || backspaceWithinNode) && !ctrlDanger) {
-        return true;
-      }
-
-      const noselection = range.startOffset === range.endOffset;
-      // If ctrl is a danger we need to skip this block and check the siblings which is done in the rest of this function
-      if (!ctrlDanger) {
-        if (
-          isDelete &&
-          noselection &&
-          range.startOffset + 1 < range.endContainer.childElementCount
-        ) {
-          const elem = range.endContainer.childNodes[range.startOffset + 1];
-          return self.check(elem) ? self.cancelKey(evt) : true;
-        }
-
-        //The range is within this container
-        if (range.startOffset !== range.endOffset) {
-          //If this container is non-editable, cancel the event, otherwise allow the event
-          return self.checkRange(range) ? self.cancelKey(evt) : true;
-        }
-      }
-
-      return !self.keyWillDelete(evt);
+      if (self.keyWillDelete(evt)) return self.cancelKey(evt);
     };
 
     // Plugin logic to intercept keydown events and prevent deletion
