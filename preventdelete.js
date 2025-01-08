@@ -68,11 +68,12 @@
     // Function to find the next editable element
     this.nextElement = (elem) => {
       let currentElem = elem;
-      let nextSibling = currentElem.nextElementSibling;
+      if (!currentElem) return;
+      let nextSibling = currentElem.nextSibling;
       while (!nextSibling) {
         currentElem = currentElem.parentElement;
-        if (currentElem?.id === self.rootId) return false;
-        nextSibling = currentElem.nextElementSibling;
+        if (!currentElem || currentElem?.id === self.rootId) return false;
+        nextSibling = currentElem.nextSibling;
       }
       return nextSibling;
     };
@@ -80,11 +81,11 @@
     // Function to find the previous editable element
     this.prevElement = (elem) => {
       let currentElem = elem;
-      let prevSibling = currentElem.previousElementSibling;
+      let prevSibling = currentElem.previousSibling;
       while (!prevSibling) {
         currentElem = currentElem.parentElement;
         if (currentElem.id === self.rootId) return false;
-        prevSibling = currentElem.previousElementSibling;
+        prevSibling = currentElem.previousSibling;
       }
       return prevSibling;
     };
@@ -109,24 +110,43 @@
       const isDelete = evt?.keyCode === 46;
 
       if (evt.shiftKey || evt.ctrlKey || isBackspace || isDelete) {
-        const selectedNode = tinymce.activeEditor.selection.getNode();
-        const range = tinymce.activeEditor.selection.getRng();
+        const selection = tinymce?.activeEditor?.selection;
+        const selectedNode = selection?.getNode?.();
+        const range = selection?.getRng?.();
+        if (!range) return;
 
-        const prevSibling = self.prevElement(range.startContainer);
-        const nextSibling = self.nextElement(range.startContainer);
-        const hasNonEditable =
-          self.hasNonEditableNode(selectedNode) ||
-          self.hasNonEditableNode(range.startContainer) ||
-          self.hasNonEditableInChildren(range.startContainer) ||
-          ((!range.startContainer.textContent ||
-            !range.startContainer.textContent.trim()) &&
+        const startContainer = range.startContainer;
+        const prevSibling = self.prevElement(startContainer);
+        const nextSibling = self.nextElement(startContainer);
+
+        const isEmptyStartContainer =
+          !range.startContainer.textContent ||
+          !range.startContainer.textContent.trim();
+
+        const conditionHasNonEditable = {
+          hasNonEditableNode_selectedNode:
+            self.hasNonEditableNode(selectedNode),
+          hasNonEditableNode_startContainer: self.hasNonEditableNode(
+            range.startContainer
+          ),
+          hasNonEditableInChildren_startContainer:
+            self.hasNonEditableInChildren(range.startContainer),
+          isBackspaceWithNonEditablePrevSibling:
+            isEmptyStartContainer &&
+            isBackspace &&
             (self.hasNonEditableNode(prevSibling) ||
-              self.hasNonEditableInChildren(prevSibling) ||
-              self.hasNonEditableNode(nextSibling)));
+              self.hasNonEditableInChildren(prevSibling)),
+          isDeleteWithNonEditableNextSibling:
+            isEmptyStartContainer &&
+            isDelete &&
+            self.hasNonEditableNode(nextSibling),
+        };
 
-        const noSelected =
-          range.startOffset === range.endOffset ||
-          range?.startContainer.textContent === '';
+        const hasNonEditable = Object.values(conditionHasNonEditable).some(
+          (condition) => condition
+        );
+
+        const noSelected = self.isNoSelected(range);
 
         // Handle delete empty line, press ctrl+delete, shift+delete, ctrl+backspace, shift+delete
         if (noSelected) {
@@ -164,6 +184,7 @@
           evt.ctrlKey &&
           (['v', 'x', 'Delete', 'Backspace'].includes(evt.key) ||
             [86, 88, 8, 46].includes(keyCode)) &&
+          !noSelected &&
           hasNonEditable
         ) {
           return self.cancelKey(evt);
@@ -172,7 +193,10 @@
         // Handle delete when next is mceNonEditable
         if (isDelete) {
           const nextSibling = self.nextElement(range.endContainer);
-          if (!nextSibling || self.hasNonEditableNode(nextSibling)) {
+          if (
+            !range.startContainer.textContent.trim() &&
+            (!nextSibling || self.hasNonEditableNode(nextSibling))
+          ) {
             return self.cancelKey(evt);
           }
         }
@@ -233,8 +257,16 @@
       return node.querySelector(`.${self.preventDeleteClass}`) !== null;
     };
 
+    this.isNoSelected = (range) => {
+      return (
+        range.startOffset === range.endOffset ||
+        range?.startContainer.textContent === ''
+      );
+    };
+
     this.handleEvent = (evt) => {
-      const range = tinymce.activeEditor.selection.getRng();
+      const range = tinymce?.activeEditor?.selection?.getRng?.();
+      if (!range) return;
 
       if (
         range.endContainer &&
@@ -249,17 +281,71 @@
     };
 
     // Plugin logic to intercept keydown events and prevent deletion
-    tinymce.PluginManager.add('preventdelete', (ed) => {
-      ed.on('keydown', (evt) => self.handleEvent(evt));
-      ed.on('BeforeExecCommand', (evt) => {
+    tinymce.PluginManager.add('preventdelete', (editor) => {
+      editor.on('keydown', (evt) => self.handleEvent(evt));
+      editor.on('BeforeExecCommand', (evt) => {
+        //? Handle when focus to notediable -> select nextSibling can editable
+        if (evt.command === 'mceFocus') {
+          const selection = evt.target?.selection;
+          const range = selection?.getRng?.();
+          const noSelected = self.isNoSelected(range);
+          const end = selection?.getEnd();
+
+          // If not range and selected notediable
+          if (noSelected && self.hasNonEditableNode(end)) {
+            let selector = end;
+            while (
+              selector?.nextSibling &&
+              !(
+                self.hasNonEditableNode(selector?.nextSibling) ||
+                self.hasNonEditableInChildren(selector?.nextSibling)
+              )
+            ) {
+              selector = selector?.nextSibling;
+            }
+            return selection.setCursorLocation(selector, 0);
+          }
+        }
+
         if (
           ['Cut', 'Delete', 'Paste', 'mceInsertContent'].includes(evt.command)
         ) {
-          self.handleEvent(evt);
+          return self.handleEvent(evt);
         }
         return true;
       });
-      ed.on('BeforeSetContent', (evt) => self.handleEvent(evt));
+      editor.on('BeforeSetContent', (evt) => self.handleEvent(evt));
+      editor.on('click', () => {
+        const selection = tinymce?.activeEditor?.selection;
+        let selectedNode = selection?.getNode?.();
+
+        if (!selectedNode) return;
+
+        const checkBeforeNonEdiable = (selector) =>
+          selector.matches(
+            '[data-mce-caret="before"], [data-mce-bogus="all"]'
+          ) && self.hasNonEditableNode(selector.nextSibling);
+
+        let isBeforeNonEdiable = checkBeforeNonEdiable(selectedNode);
+
+        // Check when click child of before NonEdiable
+        if (
+          !isBeforeNonEdiable &&
+          checkBeforeNonEdiable(selectedNode.parentElement)
+        ) {
+          isBeforeNonEdiable = true;
+          selectedNode = selectedNode.parentElement;
+        }
+
+        if (isBeforeNonEdiable) {
+          let nextElement = selectedNode.nextSibling;
+          while (self.hasNonEditableNode(nextElement)) {
+            nextElement = nextElement.nextSibling;
+          }
+
+          return selection.setCursorLocation(nextElement, 0);
+        }
+      });
     });
   }
 
